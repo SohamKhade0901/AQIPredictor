@@ -1,6 +1,9 @@
 import express from 'express';
 import { z } from 'zod';
-import { prisma } from '../utils/prisma.js';
+import { prisma, isDatabaseAvailable } from '../utils/prisma.js';
+import { getLiveWeatherRecords, DELHI_LAT, DELHI_LON } from '../services/weatherService.js';
+import { findStation } from '../services/airQualityService.js';
+import { FALLBACK_STATIONS } from './stationRoutes.js';
 
 const router = express.Router();
 
@@ -17,39 +20,52 @@ router.get('/weather', async (req, res) => {
 
   const { stationId, hours } = parsed.data;
   const cutoff = new Date(Date.now() - hours * 3600_000);
+  const resolvedStation = findStation(stationId) || FALLBACK_STATIONS[0];
 
-  try {
-    let records = [];
-    if (stationId) {
-      records = await prisma.weatherObservation.findMany({
-        where: { stationId, timestamp: { gte: cutoff } },
-        orderBy: { timestamp: 'asc' },
-        take: hours + 10,
-        select: {
-          timestamp: true, temperature: true, humidity: true,
-          windSpeed: true, windDirection: true, precipitation: true,
-          pressure: true, boundaryLayerHeight: true, source: true,
-        },
-      });
-    }
+  if (isDatabaseAvailable()) {
+    try {
+      let records = [];
+      if (stationId) {
+        records = await prisma.weatherObservation.findMany({
+          where: { stationId: resolvedStation.id, timestamp: { gte: cutoff } },
+          orderBy: { timestamp: 'asc' },
+          take: hours + 10,
+          select: {
+            timestamp: true, temperature: true, humidity: true,
+            windSpeed: true, windDirection: true, precipitation: true,
+            pressure: true, boundaryLayerHeight: true, source: true,
+          },
+        });
+      }
 
-    if (records.length === 0) {
-      records = await prisma.weatherObservation.findMany({
-        where: { timestamp: { gte: cutoff } },
-        orderBy: { timestamp: 'asc' },
-        take: hours + 10,
-        select: {
-          timestamp: true, temperature: true, humidity: true,
-          windSpeed: true, windDirection: true, precipitation: true,
-          pressure: true, boundaryLayerHeight: true, source: true,
-        },
-      });
-    }
+      if (!records || records.length === 0) {
+        records = await prisma.weatherObservation.findMany({
+          where: { timestamp: { gte: cutoff } },
+          orderBy: { timestamp: 'asc' },
+          take: hours + 10,
+          select: {
+            timestamp: true, temperature: true, humidity: true,
+            windSpeed: true, windDirection: true, precipitation: true,
+            pressure: true, boundaryLayerHeight: true, source: true,
+          },
+        });
+      }
 
-    res.json({ records, count: records.length, source: 'Open-Meteo ERA5 reanalysis' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+      if (records && records.length > 0) {
+        return res.json({ records, count: records.length, source: 'database' });
+      }
+    } catch {}
   }
+
+  // Fallback to live Open-Meteo fetch
+  const live = await getLiveWeatherRecords(resolvedStation.latitude, resolvedStation.longitude);
+  const sliced = live.slice(0, hours);
+
+  res.json({
+    records: sliced,
+    count: sliced.length,
+    source: 'Open-Meteo live forecast',
+  });
 });
 
 export default router;

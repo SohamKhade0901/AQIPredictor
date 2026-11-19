@@ -10,12 +10,13 @@ interface StationMapProps {
   onSelectStation: (id: string) => void;
   stationPm25Map?: Record<string, number>;
   compact?: boolean;
+  heightClass?: string;
 }
 
 // Re-center map when selected station changes
 const MapRecenter: React.FC<{ lat: number; lon: number }> = ({ lat, lon }) => {
   const map = useMap();
-  React.useEffect(() => {
+  useEffect(() => {
     map.setView([lat, lon], map.getZoom());
   }, [lat, lon, map]);
   return null;
@@ -33,9 +34,8 @@ function pm25ToRgba(val: number, alpha: number): string {
 
 /**
  * AQIHeatmapLayer
- * Draws a custom Canvas layer on the Leaflet map.  For each station it
+ * Draws a custom Canvas layer on the Leaflet map. For each station it
  * renders a large radial-gradient circle whose colour encodes PM2.5.
- * No external plugin required — works perfectly in Vite/ESM.
  */
 const AQIHeatmapLayer: React.FC<{
   stations: Station[];
@@ -47,7 +47,7 @@ const AQIHeatmapLayer: React.FC<{
   useEffect(() => {
     if (!stations.length) return;
 
-    // ---- Custom Leaflet canvas layer (coordinate-system–correct) ----
+    // Custom Leaflet canvas layer
     const CanvasLayer = L.Layer.extend({
       _canvas: null as HTMLCanvasElement | null,
 
@@ -58,7 +58,6 @@ const AQIHeatmapLayer: React.FC<{
         // @ts-ignore
         this._canvas = canvas;
         m.getPanes().overlayPane!.appendChild(canvas);
-        // Redraw on every pan frame, zoom, and resize
         m.on('viewreset zoom move', this._draw, this);
         // @ts-ignore
         this._map = m;
@@ -79,17 +78,11 @@ const AQIHeatmapLayer: React.FC<{
         const m = this._map as L.Map;
         if (!canvas || !m) return;
 
-        // ── KEY FIX ──────────────────────────────────────────────────────
-        // overlayPane is CSS-transformed by Leaflet during panning.
-        // We must work in *layer* coordinates (latLngToLayerPoint) and
-        // then anchor the canvas with setPosition so it moves with the pane.
         const bounds  = m.getBounds();
         const topLeft = m.latLngToLayerPoint(bounds.getNorthWest());
 
-        // Pin canvas top-left to the layer-coordinate origin
         L.DomUtil.setPosition(canvas, topLeft);
 
-        // Size canvas to the visible viewport
         const size = m.getSize();
         canvas.width  = size.x;
         canvas.height = size.y;
@@ -98,10 +91,9 @@ const AQIHeatmapLayer: React.FC<{
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
         stations.forEach((st) => {
-          const pm25 = stationPm25Map[st.id] ?? 0;
+          const pm25 = stationPm25Map[st.id] ?? st.pm25 ?? 0;
           if (pm25 <= 0) return;
 
-          // latLngToLayerPoint gives coordinates in the same system as topLeft
           const pt = m.latLngToLayerPoint([st.latitude, st.longitude]);
           const x  = pt.x - topLeft.x;
           const y  = pt.y - topLeft.y;
@@ -139,18 +131,22 @@ const AQIHeatmapLayer: React.FC<{
 /** Map-colour helpers used for circle markers and popups */
 function getAQIColor(val?: number) {
   if (val == null || val <= 0) return '#10b981';
-  if (val <= 60)  return '#10b981';
-  if (val <= 120) return '#f59e0b';
-  if (val <= 250) return '#f97316';
-  return '#ef4444';
+  if (val <= 30)  return '#00b050'; // Good
+  if (val <= 60)  return '#92d050'; // Satisfactory
+  if (val <= 90)  return '#eab308'; // Moderate
+  if (val <= 120) return '#f97316'; // Poor
+  if (val <= 250) return '#ef4444'; // Very Poor
+  return '#881337'; // Severe
 }
 
 function getAQICategory(val?: number) {
   if (val == null || val <= 0) return 'Satisfactory';
-  if (val <= 60)  return 'Good';
-  if (val <= 120) return 'Moderate';
-  if (val <= 250) return 'Poor';
-  return 'Very Poor';
+  if (val <= 30)  return 'Good';
+  if (val <= 60)  return 'Satisfactory';
+  if (val <= 90)  return 'Moderate';
+  if (val <= 120) return 'Poor';
+  if (val <= 250) return 'Very Poor';
+  return 'Severe';
 }
 
 export const StationMap: React.FC<StationMapProps> = ({
@@ -159,6 +155,7 @@ export const StationMap: React.FC<StationMapProps> = ({
   onSelectStation,
   stationPm25Map = {},
   compact = false,
+  heightClass,
 }) => {
   const [showHeatmap, setShowHeatmap] = React.useState(true);
 
@@ -166,15 +163,16 @@ export const StationMap: React.FC<StationMapProps> = ({
   const centerLat = selectedStation?.latitude  ?? 28.6139;
   const centerLon = selectedStation?.longitude ?? 77.209;
 
+  const mapHeight = heightClass || (compact ? 'h-64' : 'h-80');
+
   return (
     <div className="relative w-full h-full flex flex-col justify-between">
-
       {/* Map wrapper */}
-      <div className={`w-full rounded-xl overflow-hidden relative z-0 border border-slate-100 ${compact ? 'h-64' : 'h-80'}`}>
-
+      <div className={`w-full rounded-2xl overflow-hidden relative z-0 border border-slate-200/90 shadow-2xs ${mapHeight}`}>
         {/* Toggle – sits above the map pane */}
         <div className="absolute top-3 right-3 z-[999] flex rounded-xl overflow-hidden shadow-md border border-slate-200 text-[11px] font-bold">
           <button
+            type="button"
             onClick={() => setShowHeatmap(true)}
             className={`px-3 py-1.5 transition-colors cursor-pointer ${
               showHeatmap ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'
@@ -183,6 +181,7 @@ export const StationMap: React.FC<StationMapProps> = ({
             🌡 Heatmap
           </button>
           <button
+            type="button"
             onClick={() => setShowHeatmap(false)}
             className={`px-3 py-1.5 transition-colors cursor-pointer ${
               !showHeatmap ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'
@@ -212,35 +211,84 @@ export const StationMap: React.FC<StationMapProps> = ({
             <AQIHeatmapLayer stations={stations} stationPm25Map={stationPm25Map} />
           )}
 
-          {/* Station dot markers — always visible, style adapts to mode */}
+          {/* Station dot markers — clearly highlights the selected station */}
           {stations.map((st) => {
             const isSelected = st.id === selectedStationId;
-            const pm25 = stationPm25Map[st.id] ?? 0;
-            const color = getAQIColor(pm25);
-            const cat   = getAQICategory(pm25);
+            const pm25 = stationPm25Map[st.id] ?? st.pm25 ?? 0;
+            const color = st.currentColor || getAQIColor(pm25);
+            const cat   = st.currentCategory || getAQICategory(pm25);
+            const aqi   = st.currentAqi != null ? st.currentAqi : (pm25 > 0 ? Math.round(pm25 * 1.6) : null);
 
             return (
               <CircleMarker
                 key={st.id}
                 center={[st.latitude, st.longitude]}
-                radius={isSelected ? 11 : showHeatmap ? 5 : 9}
+                radius={isSelected ? 13 : showHeatmap ? 6 : 9}
                 pathOptions={{
                   fillColor:   color,
-                  fillOpacity: showHeatmap ? 0.9 : 0.92,
-                  color:       '#ffffff',
-                  weight:      isSelected ? 2.5 : showHeatmap ? 1 : 2,
+                  fillOpacity: isSelected ? 1 : (showHeatmap ? 0.9 : 0.92),
+                  color:       isSelected ? '#1e293b' : '#ffffff',
+                  weight:      isSelected ? 3.5 : (showHeatmap ? 1.5 : 2),
                 }}
                 eventHandlers={{ click: () => onSelectStation(st.id) }}
               >
                 <Popup className="custom-map-popup" autoPan={false}>
-                  <div className="p-1 text-slate-800 text-xs font-sans min-w-[140px]">
-                    <strong className="text-sm block font-bold text-slate-900">{st.name}</strong>
-                    <div className="mt-1 font-bold text-slate-800 text-xs">
-                      {pm25 > 0 ? `${pm25.toFixed(1)} µg/m³` : 'No data'}
+                  <div className="p-2 text-slate-800 text-xs font-sans min-w-[190px]">
+                    <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-1.5 mb-2">
+                      <strong className="text-sm font-bold text-slate-900">{st.name}</strong>
+                      {isSelected && (
+                        <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-bold">
+                          Selected
+                        </span>
+                      )}
                     </div>
-                    <div className="mt-0.5 text-[11px] font-semibold" style={{ color }}>
-                      {pm25 > 0 ? `AQI: ${Math.round(pm25 * 1.6)} (${cat})` : '—'}
+
+                    <div className="flex items-baseline justify-between mb-1">
+                      <span className="text-[10px] uppercase font-bold text-slate-400">Current AQI</span>
+                      <span className="text-base font-black" style={{ color }}>
+                        {aqi != null ? aqi : '--'} <span className="text-[10px] font-semibold">({cat})</span>
+                      </span>
                     </div>
+
+                    <div className="text-[11px] text-slate-600 mb-2 flex items-center justify-between">
+                      <span>PM2.5:</span>
+                      <span className="font-bold text-slate-900">{pm25 > 0 ? `${pm25.toFixed(1)} µg/m³` : 'No data'}</span>
+                    </div>
+
+                    {/* Multi-horizon forecast snapshot in popup */}
+                    <div className="border-t border-slate-100 pt-1.5 mb-2 grid grid-cols-3 gap-1 text-center text-[10px]">
+                      <div className="bg-slate-50 p-1 rounded">
+                        <span className="text-slate-400 block">+24h</span>
+                        <span className="font-bold text-slate-800">{st.predictedAqi24h ?? '--'}</span>
+                      </div>
+                      <div className="bg-slate-50 p-1 rounded">
+                        <span className="text-slate-400 block">+48h</span>
+                        <span className="font-bold text-slate-800">{st.predictedAqi48h ?? '--'}</span>
+                      </div>
+                      <div className="bg-slate-50 p-1 rounded">
+                        <span className="text-slate-400 block">+72h</span>
+                        <span className="font-bold text-slate-800">{st.predictedAqi72h ?? '--'}</span>
+                      </div>
+                    </div>
+
+                    {st.measurementTimeIST && (
+                      <div className="text-[9px] text-slate-400 mb-2">
+                        Observed: {st.measurementTimeIST}
+                      </div>
+                    )}
+
+                    {!isSelected && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectStation(st.id);
+                        }}
+                        className="w-full mt-1 py-1 px-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-[11px] text-center transition-colors cursor-pointer"
+                      >
+                        Select Station
+                      </button>
+                    )}
                   </div>
                 </Popup>
               </CircleMarker>
@@ -250,20 +298,22 @@ export const StationMap: React.FC<StationMapProps> = ({
       </div>
 
       {/* Legend */}
-      <div className="flex items-center justify-between gap-3 pt-2 text-[11px] font-semibold text-slate-600">
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-2 text-[11px] font-semibold text-slate-600">
         <span className="text-slate-400 font-normal italic">
-          {showHeatmap ? 'AQI heatmap — click a dot for details' : 'Station markers — click to select'}
+          {showHeatmap ? 'AQI Heatmap — click a station dot to inspect' : 'Station markers — click to select and focus'}
         </span>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           {[
-            { label: 'Good',      bg: 'bg-emerald-500' },
-            { label: 'Moderate',  bg: 'bg-amber-400'   },
-            { label: 'Poor',      bg: 'bg-orange-500'  },
-            { label: 'Very Poor', bg: 'bg-rose-500'    },
+            { label: 'Good (0–50)', bg: 'bg-emerald-500' },
+            { label: 'Satisfactory (51–100)', bg: 'bg-lime-500' },
+            { label: 'Moderate (101–200)', bg: 'bg-amber-400' },
+            { label: 'Poor (201–300)', bg: 'bg-orange-500' },
+            { label: 'Very Poor (301–400)', bg: 'bg-rose-500' },
+            { label: 'Severe (401–500)', bg: 'bg-purple-900' },
           ].map(({ label, bg }) => (
             <div key={label} className="flex items-center gap-1.5">
               <span className={`h-2.5 w-2.5 rounded-sm ${bg}`} />
-              <span>{label}</span>
+              <span className="text-[10px]">{label}</span>
             </div>
           ))}
         </div>

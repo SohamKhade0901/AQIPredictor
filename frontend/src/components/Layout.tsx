@@ -4,12 +4,13 @@ import { Sidebar } from './Sidebar';
 import { TopHeader } from './TopHeader';
 import { useStation } from '../context/StationContext';
 import { AlertCircle } from 'lucide-react';
+import { VoiceChatbot } from './VoiceChatbot';
 
 export const Layout: React.FC = () => {
   const { error, refresh, isRefreshing } = useStation();
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] text-slate-800 flex font-sans antialiased">
+    <div className="min-h-screen bg-[#f8fafc] text-slate-800 flex font-sans antialiased relative">
       {/* Left Sticky Sidebar */}
       <Sidebar />
 
@@ -38,6 +39,9 @@ export const Layout: React.FC = () => {
           <Outlet />
         </div>
       </div>
+
+      {/* Floating AI Voice Chatbot Assistant */}
+      <VoiceChatbot />
     </div>
   );
 };

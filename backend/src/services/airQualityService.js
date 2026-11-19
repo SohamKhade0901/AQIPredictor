@@ -1,154 +1,213 @@
 import axios from 'axios';
 import { config } from '../config/env.js';
-import { prisma } from '../utils/prisma.js';
+import { prisma, isDatabaseAvailable } from '../utils/prisma.js';
 
 const OPENAQ_BASE = 'https://api.openaq.org/v3';
 
-// Delhi NCR stations — seeded from OpenAQ with known IDs for major monitoring stations
+// Delhi NCR stations — mapped to verified active OpenAQ v3 location IDs
 export const DELHI_STATIONS = [
-  { name: 'Anand Vihar',       lat: 28.6469, lon: 77.3162, openaqId: '8118'  },
-  { name: 'Punjabi Bagh',      lat: 28.6635, lon: 77.1315, openaqId: '8122'  },
-  { name: 'RK Puram',          lat: 28.5640, lon: 77.1740, openaqId: '8127'  },
-  { name: 'ITO',                lat: 28.6289, lon: 77.2406, openaqId: '8119'  },
-  { name: 'Mandir Marg',       lat: 28.6363, lon: 77.2010, openaqId: '8121'  },
-  { name: 'Lodhi Road',        lat: 28.5918, lon: 77.2279, openaqId: '8120'  },
-  { name: 'Dwarka Sec 8',      lat: 28.5785, lon: 77.0547, openaqId: '8117'  },
-  { name: 'Rohini',            lat: 28.7330, lon: 77.1170, openaqId: '8126'  },
-  { name: 'Gurugram Sector 51',lat: 28.4497, lon: 77.0997, openaqId: '64723' },
-  { name: 'Noida Sector 62',   lat: 28.6269, lon: 77.3626, openaqId: '64724' },
+  { id: '235',   name: 'Anand Vihar',        lat: 28.6468, lon: 77.3160, latitude: 28.6468, longitude: 77.3160, openaqId: '235',   city: 'Delhi NCR', legacyIds: ['8118'] },
+  { id: '50',    name: 'Punjabi Bagh',       lat: 28.6740, lon: 77.1310, latitude: 28.6740, longitude: 77.1310, openaqId: '50',    city: 'Delhi NCR', legacyIds: ['8122'] },
+  { id: '17',    name: 'RK Puram',           lat: 28.5633, lon: 77.1869, latitude: 28.5633, longitude: 77.1869, openaqId: '17',    city: 'Delhi NCR', legacyIds: ['8127'] },
+  { id: '5613',  name: 'ITO',                lat: 28.6286, lon: 77.2411, latitude: 28.6286, longitude: 77.2411, openaqId: '5613',  city: 'Delhi NCR', legacyIds: ['8119'] },
+  { id: '6358',  name: 'Mandir Marg',        lat: 28.6364, lon: 77.2011, latitude: 28.6364, longitude: 77.2011, openaqId: '6358',  city: 'Delhi NCR', legacyIds: ['8121'] },
+  { id: '5634',  name: 'Lodhi Road',         lat: 28.5918, lon: 77.2273, latitude: 28.5918, longitude: 77.2273, openaqId: '5634',  city: 'Delhi NCR', legacyIds: ['8120'] },
+  { id: '6931',  name: 'Dwarka Sec 8',       lat: 28.5710, lon: 77.0719, latitude: 28.5710, longitude: 77.0719, openaqId: '6931',  city: 'Delhi NCR', legacyIds: ['8117'] },
+  { id: '10831', name: 'Rohini',             lat: 28.7325, lon: 77.1199, latitude: 28.7325, longitude: 77.1199, openaqId: '10831', city: 'Delhi NCR', legacyIds: ['8126'] },
+  { id: '10900', name: 'Gurugram Sector 51', lat: 28.4275, lon: 77.1465, latitude: 28.4275, longitude: 77.1465, openaqId: '10900', city: 'Delhi NCR', legacyIds: ['64723'] },
+  { id: '5616',  name: 'Noida Sector 62',    lat: 28.6245, lon: 77.3577, latitude: 28.6245, longitude: 77.3577, openaqId: '5616',  city: 'Delhi NCR', legacyIds: ['64724'] },
 ];
 
+// OpenAQ v3 verified active PM2.5 sensor IDs for each station location
+export const PM25_SENSOR_MAP = {
+  '17': 12234787,
+  '50': 12234796,
+  '235': 12235610,
+  '5613': 12234753,
+  '5616': 12234720,
+  '5634': 12234714,
+  '6358': 12234778,
+  '6931': 12235020,
+  '10831': 12235092,
+  '10900': 12236251,
+};
+
+// In-memory cache for live station observations (TTL: 10 minutes)
+const liveStationObsCache = new Map();
+const CACHE_TTL_MS = 10 * 60_000;
+
+export function findStation(queryId) {
+  if (!queryId) return null;
+  const q = String(queryId).trim().toLowerCase();
+  const qNorm = q.replace(/[^a-z0-9]/g, '');
+  return (
+    DELHI_STATIONS.find(
+      (s) =>
+        s.id.toLowerCase() === q ||
+        s.openaqId.toLowerCase() === q ||
+        s.name.toLowerCase() === q ||
+        s.name.toLowerCase().replace(/\s+/g, '-') === q ||
+        s.name.toLowerCase().replace(/[^a-z0-9]/g, '') === qNorm ||
+        (s.legacyIds && s.legacyIds.includes(String(queryId)))
+    ) || null
+  );
+}
+
+/**
+ * Fetch genuine real-time PM2.5 measurement for a specific station from OpenAQ
+ * Strictly extracts the true measurement timestamp without inventing the current time.
+ */
+export async function fetchStationLatestPm25(stationIdentifier, options = {}) {
+  const { forceRefresh = false } = options;
+  const station = findStation(stationIdentifier);
+  if (!station) return null;
+
+  // Check cache first if not forcing refresh
+  if (!forceRefresh) {
+    const cached = liveStationObsCache.get(station.id);
+    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+      return cached.data;
+    }
+  }
+
+  if (!config.openaqEnabled || !config.openaqApiKey) {
+    return null;
+  }
+
+  try {
+    const resp = await axios.get(`${OPENAQ_BASE}/locations/${station.openaqId}/latest`, {
+      headers: { 'X-API-Key': config.openaqApiKey },
+      timeout: 8000,
+    });
+
+    const results = resp.data?.results || [];
+    const targetSensorId = PM25_SENSOR_MAP[station.openaqId];
+
+    // Filter candidate records with valid non-negative readings
+    const validRecords = results.filter((r) => r.value !== null && r.value >= 0);
+
+    // Match exact active PM2.5 sensor ID first
+    let pm25Record = validRecords.find((r) => r.sensorsId === targetSensorId);
+
+    // Fallback: sort all valid candidate records strictly by actual measurement timestamp DESCENDING
+    // This strictly prevents picking up obsolete historical sensors from 2018 or 2022
+    if (!pm25Record && validRecords.length > 0) {
+      const sortedByTime = [...validRecords].sort((a, b) => {
+        const timeA = new Date(a.datetime?.utc || a.datetime || 0).getTime();
+        const timeB = new Date(b.datetime?.utc || b.datetime || 0).getTime();
+        return timeB - timeA;
+      });
+      pm25Record = sortedByTime[0];
+    }
+
+    if (pm25Record && pm25Record.value !== null && pm25Record.value >= 0) {
+      const utcTs = pm25Record.datetime?.utc || (typeof pm25Record.datetime === 'string' ? pm25Record.datetime : null);
+      if (!utcTs) {
+        console.warn(`[OpenAQ] Observation for ${station.name} missing datetime field`);
+        return null;
+      }
+
+      const reading = {
+        stationId: station.id,
+        stationName: station.name,
+        value: Number(pm25Record.value.toFixed(1)),
+        unit: 'µg/m³',
+        timestamp: utcTs, // Strictly true measurement timestamp from sensor
+        localTimestamp: pm25Record.datetime?.local || null, // Asia/Kolkata
+        sensorId: pm25Record.sensorsId,
+        source: 'OpenAQ-Live',
+      };
+
+      liveStationObsCache.set(station.id, {
+        data: reading,
+        fetchedAt: Date.now(),
+      });
+
+      return reading;
+    }
+
+    return null;
+  } catch (err) {
+    console.warn(`[OpenAQ] Latest fetch failed for station ${station.name} (${station.openaqId}):`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Fetch latest PM2.5 observations for all Delhi NCR stations in parallel
+ */
+export async function fetchAllStationsLatestPm25(options = {}) {
+  const promises = DELHI_STATIONS.map((s) =>
+    fetchStationLatestPm25(s.id, options).then((obs) => ({ stationId: s.id, obs }))
+  );
+
+  const settled = await Promise.allSettled(promises);
+  const map = new Map();
+
+  for (const item of settled) {
+    if (item.status === 'fulfilled' && item.value.obs) {
+      map.set(item.value.stationId, item.value.obs);
+    }
+  }
+
+  return map;
+}
+
 export async function seedStations() {
+  if (!isDatabaseAvailable()) return;
   console.log('[OpenAQ] Seeding Delhi NCR stations...');
   for (const s of DELHI_STATIONS) {
-    await prisma.station.upsert({
-      where: { openaqId: s.openaqId },
-      update: { latitude: s.lat, longitude: s.lon, name: s.name },
-      create: {
-        name: s.name, city: 'Delhi NCR',
-        latitude: s.lat, longitude: s.lon,
-        openaqId: s.openaqId, source: 'OpenAQ',
-      },
-    });
+    try {
+      await prisma.station.upsert({
+        where: { openaqId: s.openaqId },
+        update: { latitude: s.lat, longitude: s.lon, name: s.name },
+        create: {
+          name: s.name,
+          city: s.city,
+          latitude: s.lat,
+          longitude: s.lon,
+          openaqId: s.openaqId,
+          source: 'OpenAQ',
+        },
+      });
+    } catch {}
   }
   console.log(`[OpenAQ] Seeded ${DELHI_STATIONS.length} stations`);
 }
 
 export async function fetchRecentObservations(stationOpenaqId, dbStationId, hoursBack = 48) {
-  if (!config.openaqEnabled) {
-    console.warn('[OpenAQ] Skipped — no API key configured');
+  if (!config.openaqEnabled || !isDatabaseAvailable()) {
     return 0;
   }
 
-  const dateFrom = new Date(Date.now() - hoursBack * 3600_000).toISOString();
+  const latest = await fetchStationLatestPm25(stationOpenaqId);
+  if (!latest) return 0;
 
   try {
-    // Get sensors for this location
-    const sensorsResp = await axios.get(
-      `${OPENAQ_BASE}/locations/${stationOpenaqId}/sensors`,
-      { headers: { 'X-API-Key': config.openaqApiKey }, timeout: 10000 }
-    );
-
-    const sensors = sensorsResp.data?.results || [];
-    // Pick the PM2.5 sensor that has the most recent reporting timestamp
-    const pm25Sensors = sensors.filter(s =>
-      s.parameter?.name?.toLowerCase() === 'pm25' ||
-      s.parameter?.displayName?.toLowerCase().includes('pm2.5')
-    );
-    pm25Sensors.sort((a, b) => {
-      const tA = new Date(a.datetimeLast?.utc || 0).getTime();
-      const tB = new Date(b.datetimeLast?.utc || 0).getTime();
-      return tB - tA;
-    });
-    const pm25Sensor = pm25Sensors[0];
-
-    if (!pm25Sensor) {
-      console.warn(`[OpenAQ] No PM2.5 sensor found at location ${stationOpenaqId}`);
-      return 0;
-    }
-
-    let inserted = 0;
-
-    // 1. Fetch exact latest real-time measurement for this location
-    try {
-      const latestResp = await axios.get(
-        `${OPENAQ_BASE}/locations/${stationOpenaqId}/latest`,
-        { headers: { 'X-API-Key': config.openaqApiKey }, timeout: 10000 }
-      );
-      const latestResults = latestResp.data?.results || [];
-      // Match the exact active PM2.5 sensor ID
-      const latestPm25 = latestResults.find(r => r.sensorsId === pm25Sensor.id);
-
-      if (latestPm25 && latestPm25.value !== null && latestPm25.value >= 0) {
-        const ts = new Date(latestPm25.datetime?.utc || latestPm25.datetime?.local);
-        if (!isNaN(ts.getTime())) {
-          await prisma.pollutionObservation.upsert({
-            where: {
-              stationId_timestamp_pollutant: {
-                stationId: dbStationId, timestamp: ts, pollutant: 'pm25',
-              },
-            },
-            update: { value: latestPm25.value, fetchedAt: new Date(), source: 'OpenAQ-Live' },
-            create: {
-              stationId: dbStationId, timestamp: ts,
-              pollutant: 'pm25', value: latestPm25.value, unit: 'µg/m³',
-              source: 'OpenAQ-Live', fetchedAt: new Date(),
-            },
-          });
-          inserted++;
-          console.log(`[OpenAQ] ${stationOpenaqId}: Saved latest live PM2.5 = ${latestPm25.value} µg/m³`);
-        }
-      }
-    } catch (latestErr) {
-      console.warn(`[OpenAQ] Could not fetch latest for ${stationOpenaqId}:`, latestErr.message);
-    }
-
-    // 2. Fetch recent hourly measurements
-    try {
-      const measResp = await axios.get(
-        `${OPENAQ_BASE}/sensors/${pm25Sensor.id}/measurements/hourly`,
-        {
-          params: { date_from: dateFrom, limit: 50 },
-          headers: { 'X-API-Key': config.openaqApiKey },
-          timeout: 10000,
-        }
-      );
-
-      const measurements = measResp.data?.results || [];
-      for (const m of measurements) {
-        const value = m.value?.average ?? m.value;
-        if (value === null || value === undefined || value < 0) continue;
-
-        const ts = new Date(m.period?.datetimeTo?.utc || m.datetime?.utc || m.date?.utc);
-        if (isNaN(ts.getTime())) continue;
-
-        await prisma.pollutionObservation.upsert({
-          where: {
-            stationId_timestamp_pollutant: {
-              stationId: dbStationId, timestamp: ts, pollutant: 'pm25',
-            },
+    const ts = new Date(latest.timestamp);
+    if (!isNaN(ts.getTime())) {
+      await prisma.pollutionObservation.upsert({
+        where: {
+          stationId_timestamp_pollutant: {
+            stationId: dbStationId || stationOpenaqId,
+            timestamp: ts,
+            pollutant: 'pm25',
           },
-          update: { value, fetchedAt: new Date() },
-          create: {
-            stationId: dbStationId, timestamp: ts,
-            pollutant: 'pm25', value, unit: 'µg/m³',
-            source: 'OpenAQ', fetchedAt: new Date(),
-          },
-        });
-        inserted++;
-      }
-    } catch (hourlyErr) {
-      console.warn(`[OpenAQ] Hourly history skipped for ${stationOpenaqId} (${hourlyErr.message})`);
+        },
+        update: { value: latest.value, fetchedAt: new Date(), source: 'OpenAQ-Live' },
+        create: {
+          stationId: dbStationId || stationOpenaqId,
+          timestamp: ts,
+          pollutant: 'pm25',
+          value: latest.value,
+          unit: 'µg/m³',
+          source: 'OpenAQ-Live',
+          fetchedAt: new Date(),
+        },
+      });
+      return 1;
     }
+  } catch {}
 
-    console.log(`[OpenAQ] ${stationOpenaqId}: total ${inserted} PM2.5 observations processed`);
-    return inserted;
-  } catch (err) {
-    if (err.response?.status === 429) {
-      console.warn('[OpenAQ] Rate limited — will retry later');
-      throw Object.assign(new Error('Rate limited'), { retryable: true });
-    }
-    console.error(`[OpenAQ] Error fetching ${stationOpenaqId}:`, err.message);
-    return 0;
-  }
+  return 0;
 }

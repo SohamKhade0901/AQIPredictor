@@ -8,7 +8,12 @@ interface ApiResponse<T> {
   stale?: boolean;
 }
 
-async function apiFetch<T>(path: string, options?: RequestInit): Promise<ApiResponse<T>> {
+interface RequestOptions extends RequestInit {
+  timeoutMs?: number;
+}
+
+async function apiFetch<T>(path: string, options?: RequestOptions): Promise<ApiResponse<T>> {
+  const timeoutMs = options?.timeoutMs ?? 60000;
   try {
     const cleanPath = path.startsWith('/') ? path : `/${path}`;
     const url = `${BASE}${cleanPath}`;
@@ -16,7 +21,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<ApiResp
     const resp = await fetch(url, {
       ...options,
       headers: { 'Content-Type': 'application/json', ...options?.headers },
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     const data = await resp.json();
@@ -47,9 +52,50 @@ export const api = {
     if (hours) params.set('hours', String(hours));
     return apiFetch<any>(`/api/weather?${params}`);
   },
-  forecast: (stationId: string, hours = 72) =>
-    apiFetch<any>(`/api/forecast?stationId=${stationId}&hours=${hours}`),
+  forecast: (stationId: string, hours = 72, force = false) => {
+    const params = new URLSearchParams({ stationId, hours: String(hours) });
+    if (force) params.set('force', 'true');
+    return apiFetch<any>(`/api/forecast?${params}`, { timeoutMs: 60000 });
+  },
+  allForecasts: (horizon = 72, force = false) => {
+    const params = new URLSearchParams({ horizon: String(horizon) });
+    if (force) params.set('force', 'true');
+    return apiFetch<{ horizon: number; count: number; stations: any[] }>(`/api/forecast/all?${params}`, { timeoutMs: 60000 });
+  },
+  stationAqi: (stationId: string) =>
+    apiFetch<any>(`/api/stations/${stationId}/aqi`),
+  stationForecast: (stationId: string, horizon = 72, force = false) => {
+    const params = new URLSearchParams({ horizon: String(horizon) });
+    if (force) params.set('force', 'true');
+    return apiFetch<any>(`/api/stations/${stationId}/forecast?${params}`, { timeoutMs: 60000 });
+  },
   trapping: (stationId: string) =>
     apiFetch<any>(`/api/analysis/trapping?stationId=${stationId}`),
   modelMetrics: () => apiFetch<any>('/api/model/metrics'),
+  chat: (payload: {
+    message: string;
+    history?: Array<{ role: string; content: string }>;
+    context?: any;
+  }) =>
+    apiFetch<{
+      reply: string;
+      provider: string;
+      model: string;
+      timestamp: string;
+      sources?: string[];
+    }>('/api/chat', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: 30000,
+    }),
+  chatStatus: () =>
+    apiFetch<{
+      status: string;
+      configured: boolean;
+      activeProvider: string;
+      supportedProviders: string[];
+      recommendedProvider: string;
+      apiKeyEnvVar: string;
+      instructions: string;
+    }>('/api/chat/status'),
 };

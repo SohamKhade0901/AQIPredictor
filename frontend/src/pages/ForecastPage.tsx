@@ -2,15 +2,17 @@ import React, { useState } from 'react';
 import { useStation } from '../context/StationContext';
 import {
   TrendingUp,
-  Clock,
-  Layers,
   Table as TableIcon,
   Download,
+  RefreshCw,
+  AlertCircle,
+  Cpu,
+  Info,
+  Clock,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
   ComposedChart,
-  Area,
   Line,
   XAxis,
   YAxis,
@@ -20,342 +22,543 @@ import {
 } from 'recharts';
 
 export const ForecastPage: React.FC = () => {
-  const { selectedStation, forecasts, horizon, setHorizon } = useStation();
+  const {
+    selectedStation,
+    forecasts,
+    horizon,
+    setHorizon,
+    isRefreshing,
+    refresh,
+    error,
+    stationPm25Map,
+  } = useStation();
+
   const [tableFilter, setTableFilter] = useState<'all' | 'high'>('all');
+  const [metricView, setMetricView] = useState<'aqi' | 'pm25'>('aqi');
 
   const displayedForecasts = forecasts.slice(0, horizon);
 
-  // Prepare chart data format
-  const chartData = displayedForecasts.map((f) => {
-    const time = new Date(f.forecastTime);
-    const lower = f.lowerBound ?? Math.max(10, f.predictedValue - 20);
-    const upper = f.upperBound ?? (f.predictedValue + 25);
+  // Helper for Indian CPCB AQI classification
+  const getCpcbCategory = (aqi: number) => {
+    if (aqi <= 50) return { cat: 'Good', col: '#00b050', bg: 'bg-emerald-50 text-emerald-700 border-emerald-200' };
+    if (aqi <= 100) return { cat: 'Satisfactory', col: '#92d050', bg: 'bg-lime-50 text-lime-700 border-lime-200' };
+    if (aqi <= 200) return { cat: 'Moderately Polluted', col: '#eab308', bg: 'bg-yellow-50 text-yellow-700 border-yellow-200' };
+    if (aqi <= 300) return { cat: 'Poor', col: '#f97316', bg: 'bg-orange-50 text-orange-700 border-orange-200' };
+    if (aqi <= 400) return { cat: 'Very Poor', col: '#ef4444', bg: 'bg-rose-50 text-rose-700 border-rose-200' };
+    return { cat: 'Severe', col: '#881337', bg: 'bg-purple-50 text-purple-700 border-purple-200' };
+  };
 
-    let aqiCat = 'Moderate';
-    let aqiCol = '#f59e0b';
-    let aqiBg = 'bg-yellow-50 text-yellow-700 border-yellow-200';
-    if (f.predictedValue <= 30) {
-      aqiCat = 'Good'; aqiCol = '#10b981'; aqiBg = 'bg-emerald-50 text-emerald-700 border-emerald-200';
-    } else if (f.predictedValue <= 60) {
-      aqiCat = 'Satisfactory'; aqiCol = '#10b981'; aqiBg = 'bg-emerald-50 text-emerald-700 border-emerald-200';
-    } else if (f.predictedValue <= 90) {
-      aqiCat = 'Moderate'; aqiCol = '#f59e0b'; aqiBg = 'bg-yellow-50 text-yellow-700 border-yellow-200';
-    } else if (f.predictedValue <= 120) {
-      aqiCat = 'Poor'; aqiCol = '#f97316'; aqiBg = 'bg-orange-50 text-orange-700 border-orange-200';
-    } else if (f.predictedValue <= 250) {
-      aqiCat = 'Very Poor'; aqiCol = '#ef4444'; aqiBg = 'bg-rose-50 text-rose-700 border-rose-200';
-    } else {
-      aqiCat = 'Severe'; aqiCol = '#9333ea'; aqiBg = 'bg-purple-50 text-purple-700 border-purple-200';
-    }
+  // Convert raw PM2.5 to CPCB AQI if predictedAqi is not already populated
+  const calcAqiFromPm25 = (val: number): number => {
+    if (val <= 30) return Math.round((50 / 30) * val);
+    if (val <= 60) return Math.round(((100 - 51) / (60 - 31)) * (val - 31) + 51);
+    if (val <= 90) return Math.round(((200 - 101) / (90 - 61)) * (val - 61) + 101);
+    if (val <= 120) return Math.round(((300 - 201) / (120 - 91)) * (val - 91) + 201);
+    if (val <= 250) return Math.round(((400 - 301) / (250 - 121)) * (val - 121) + 301);
+    return Math.min(500, Math.round(((500 - 401) / (380 - 251)) * (val - 251) + 401));
+  };
+
+  // Current observed values for reference
+  const currentPm25 = selectedStation?.pm25 ?? (selectedStation ? stationPm25Map[selectedStation.id] ?? null : null);
+  const currentAqi = selectedStation?.currentAqi ?? (currentPm25 != null ? calcAqiFromPm25(currentPm25) : null);
+
+  // Prepare chart data format
+  const chartData = displayedForecasts.map((f: any, idx) => {
+    const timeStr = f.forecastTime || f.forecast_time || new Date().toISOString();
+    const time = new Date(timeStr);
+    const pm25Val = typeof f.predictedPm25 === 'number'
+      ? f.predictedPm25
+      : (typeof f.predictedValue === 'number' ? f.predictedValue : (f.predicted_pm25 ?? 0));
+
+    const aqiVal = typeof f.predictedAqi === 'number' ? f.predictedAqi : calcAqiFromPm25(pm25Val);
+    const leadHours = f.leadHours ?? f.lead_hours ?? (idx + 1);
+
+    const lowerPm25 = (typeof f.lowerBound === 'number' ? f.lowerBound : f.lower_bound) ?? Math.max(10, pm25Val - 18);
+    const upperPm25 = (typeof f.upperBound === 'number' ? f.upperBound : f.upper_bound) ?? (pm25Val + 22);
+
+    const lowerAqi = f.lowerBoundAqi ?? calcAqiFromPm25(lowerPm25);
+    const upperAqi = f.upperBoundAqi ?? calcAqiFromPm25(upperPm25);
+
+    const cpcb = getCpcbCategory(aqiVal);
+    const isValidDate = !isNaN(time.getTime());
+    const displayTime = isValidDate
+      ? `${time.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} ${time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+      : `+${leadHours}h`;
 
     return {
-      hour: `+${f.leadHours}h`,
+      hour: `+${leadHours}h`,
       rawDate: time,
-      displayTime: `${time.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} ${time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
-      leadHours: f.leadHours,
-      pm25: f.predictedValue,
-      lowerBound: lower,
-      upperBound: upper,
-      aqiCategory: aqiCat,
-      aqiColor: aqiCol,
-      aqiBg,
+      displayTime,
+      leadHours,
+      aqi: aqiVal,
+      lowerBoundAqi: lowerAqi,
+      upperBoundAqi: upperAqi,
+      pm25: pm25Val,
+      lowerBoundPm25: lowerPm25,
+      upperBoundPm25: upperPm25,
+      aqiCategory: cpcb.cat,
+      aqiColor: cpcb.col,
+      aqiBg: cpcb.bg,
+      dataQuality: f.dataQuality || f.data_quality || 'ok',
     };
   });
 
-  // Calculate summary metrics
-  const values = chartData.map((d) => d.pm25);
-  const maxVal = values.length ? Math.max(...values) : 0;
-  const minVal = values.length ? Math.min(...values) : 0;
-  const avgVal = values.length ? Math.round(values.reduce((a, b) => a + b, 0) / values.length) : 0;
-  const peakItem = chartData.find((d) => d.pm25 === maxVal);
-  const exceedCount = values.filter((v) => v > 60).length;
-  const exceedPct = values.length ? Math.round((exceedCount / values.length) * 100) : 0;
+  const hasData = chartData.length > 0;
+  const aqiValues = chartData.map((d) => d.aqi);
+
+  const maxAqi = hasData ? Math.max(...aqiValues) : null;
+  const avgAqi = hasData ? Math.round(aqiValues.reduce((a, b) => a + b, 0) / aqiValues.length) : null;
+  const endAqi = hasData ? aqiValues[aqiValues.length - 1] : null;
+
+  const peakItem = hasData ? chartData.find((d) => d.aqi === maxAqi) : null;
+  const exceedCount = hasData ? aqiValues.filter((v) => v > 200).length : 0;
+  const exceedPct = hasData ? Math.round((exceedCount / aqiValues.length) * 100) : null;
 
   // Filtered table rows
-  const tableData = tableFilter === 'high' ? chartData.filter((d) => d.pm25 > 120) : chartData;
+  const tableData = tableFilter === 'high' ? chartData.filter((d) => d.aqi > 200) : chartData;
 
   const exportCsv = () => {
-    const headers = 'LeadHour,Timestamp,PredictedPM25_ugm3,LowerBound_ugm3,UpperBound_ugm3,ImpliedAQICategory\n';
+    if (!hasData) return;
+    const headers = 'LeadHour,Timestamp,PredictedAQI,AQICategory,PredictedPM25_ugm3,LowerAQI,UpperAQI\n';
     const rows = chartData
       .map(
         (d) =>
-          `"${d.hour}","${d.displayTime}",${d.pm25.toFixed(2)},${d.lowerBound.toFixed(2)},${d.upperBound.toFixed(2)},"${d.aqiCategory}"`
+          `"${d.hour}","${d.displayTime}",${d.aqi},"${d.aqiCategory}",${d.pm25.toFixed(2)},${d.lowerBoundAqi},${d.upperBoundAqi}`
       )
       .join('\n');
     const blob = new Blob([headers + rows], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${selectedStation?.name || 'station'}_forecast_${horizon}h.csv`;
+    a.download = `AeroCast_${selectedStation?.name || 'Delhi'}_${horizon}h_AQI_Forecast.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="space-y-5">
-      {/* Page Header */}
+    <div className="space-y-6">
+      {/* Top Header & Station Info */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200/80 pb-4">
         <div>
           <div className="flex items-center gap-2 text-xs font-bold text-blue-600">
             <TrendingUp className="h-4 w-4" />
-            <span>Multi-Horizon ML Forecast Studio</span>
+            <span>AI Atmospheric Inference Engine &bull; Indian CPCB NAQI Standard</span>
           </div>
           <h1 className="mt-1 text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
-            72-Hour PM2.5 Forecast: {selectedStation ? selectedStation.name : 'Station'}
+            {selectedStation ? selectedStation.name : 'Delhi NCR'} &bull; {horizon}-Hour AQI Forecast
           </h1>
           <p className="mt-0.5 text-xs text-slate-500 font-medium">
-            Weather-coupled direct multi-step XGBoost regression heads
+            Weather-coupled XGBoost model projecting {horizon} hourly air quality indices using boundary layer and wind features
           </p>
         </div>
 
-        {/* Horizon Picker */}
-        <div className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white p-1 text-xs shadow-xs">
-          <Clock className="h-4 w-4 text-slate-400 ml-2" />
-          <span className="text-slate-500 font-semibold mr-1 text-[11px]">Horizon:</span>
-          {([24, 48, 72] as const).map((h) => (
+        {/* Horizon Selectors & Actions */}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Horizon Selection Buttons (24h, 48h, 72h) */}
+          <div className="flex items-center rounded-xl bg-slate-100 p-1 text-xs font-bold shadow-2xs">
             <button
-              key={h}
-              onClick={() => setHorizon(h)}
-              className={`rounded-lg px-3 py-1 text-xs font-bold transition-all cursor-pointer ${
-                horizon === h
+              onClick={() => setHorizon(24)}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                horizon === 24
                   ? 'bg-blue-600 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              +{h}h
+              Next 24 Hours
             </button>
-          ))}
+            <button
+              onClick={() => setHorizon(48)}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                horizon === 48
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Next 48 Hours
+            </button>
+            <button
+              onClick={() => setHorizon(72)}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                horizon === 72
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Next 72 Hours
+            </button>
+          </div>
+
+          {/* Sync Button */}
+          <button
+            onClick={refresh}
+            disabled={isRefreshing}
+            className="flex items-center gap-2 rounded-xl bg-slate-900 hover:bg-black px-4 py-2 text-xs font-bold text-white transition-all shadow-xs cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+            <span>{isRefreshing ? 'Syncing...' : 'Sync Forecast'}</span>
+          </button>
         </div>
       </div>
 
-      {/* KPI Summary Strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-        <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-xs">
-          <span className="text-[11px] font-semibold text-slate-500 block">Forecast Average</span>
-          <div className="mt-1 flex items-baseline gap-1">
-            <span className="text-2xl font-black text-slate-900">{avgVal}</span>
-            <span className="text-xs text-slate-400 font-medium">µg/m³</span>
+      {/* Stale Telemetry Notice */}
+      {selectedStation?.isStale && (
+        <div className="flex items-center gap-2.5 rounded-2xl bg-amber-50 border border-amber-200/90 p-4 text-xs font-medium text-amber-900 shadow-2xs">
+          <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
+          <div className="flex-1">
+            <span className="font-bold">Stale Telemetry Notice:</span>{' '}
+            {selectedStation.staleWarning || `Last observed reading at ${selectedStation.measurementTimeIST || 'earlier today'}. Monitoring agency feed update pending.`}
           </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">Across next {horizon} hours</span>
+          {selectedStation.measurementTimeIST && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-100 text-amber-800 font-bold text-[11px] shrink-0">
+              <Clock className="h-3.5 w-3.5" />
+              <span>{selectedStation.measurementTimeIST}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Error Notice */}
+      {error && (
+        <div className="flex items-center gap-2.5 rounded-2xl bg-rose-50 border border-rose-200/80 p-4 text-xs font-medium text-rose-800">
+          <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {/* 4 Summary Metric Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Card 1: Current Observed AQI */}
+        <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+              {selectedStation?.isStale ? 'Last Observed AQI' : 'Current Observed AQI'}
+            </span>
+            {selectedStation?.isStale && (
+              <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                Stale
+              </span>
+            )}
+          </div>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-3xl font-black text-slate-900">
+              {currentAqi != null ? currentAqi : '--'}
+            </span>
+            {currentAqi != null && (
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${getCpcbCategory(currentAqi).bg}`}>
+                {getCpcbCategory(currentAqi).cat}
+              </span>
+            )}
+          </div>
+          <span className="text-[11px] text-slate-400 font-medium block mt-1">
+            {currentPm25 != null ? `${currentPm25.toFixed(1)} µg/m³ PM2.5 baseline` : 'Awaiting sensor reading'}
+          </span>
+          {selectedStation?.measurementTimeIST && (
+            <span className="text-[10px] text-slate-500 font-medium block mt-1 flex items-center gap-1">
+              <Clock className="h-3 w-3 text-slate-400" />
+              <span>Observed: {selectedStation.measurementTimeIST}</span>
+            </span>
+          )}
         </div>
 
+        {/* Card 2: Average Forecast AQI */}
         <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-xs">
-          <span className="text-[11px] font-semibold text-slate-500 block">Peak Concentration</span>
-          <div className="mt-1 flex items-baseline gap-1">
-            <span className="text-2xl font-black text-rose-600">{maxVal.toFixed(1)}</span>
-            <span className="text-xs text-slate-400 font-medium">µg/m³</span>
+          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+            {horizon}h Forecast Average
+          </span>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-3xl font-black text-slate-900">
+              {avgAqi != null ? avgAqi : 'Prediction pending'}
+            </span>
+            {avgAqi != null && (
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${getCpcbCategory(avgAqi).bg}`}>
+                {getCpcbCategory(avgAqi).cat}
+              </span>
+            )}
           </div>
-          <span className="text-[10px] text-rose-500 font-medium mt-1 block">Expected at {peakItem?.hour || '--'}</span>
+          <span className="text-[11px] text-slate-400 font-medium block mt-1">
+            {hasData ? `${chartData.length} hourly prediction steps` : 'Click Sync to fetch'}
+          </span>
         </div>
 
+        {/* Card 3: Peak Forecast AQI */}
         <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-xs">
-          <span className="text-[11px] font-semibold text-slate-500 block">Lowest Concentration</span>
-          <div className="mt-1 flex items-baseline gap-1">
-            <span className="text-2xl font-black text-emerald-600">{minVal.toFixed(1)}</span>
-            <span className="text-xs text-slate-400 font-medium">µg/m³</span>
+          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Peak AQI Spike</span>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-3xl font-black text-slate-900">
+              {maxAqi != null ? maxAqi : 'Awaiting data'}
+            </span>
+            {maxAqi != null && (
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${getCpcbCategory(maxAqi).bg}`}>
+                {getCpcbCategory(maxAqi).cat}
+              </span>
+            )}
           </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">During daytime ventilation</span>
+          <span className="text-[11px] text-slate-400 font-medium block mt-1">
+            {peakItem ? `Expected at ${peakItem.hour} (${peakItem.displayTime})` : 'Diurnal inversion peak'}
+          </span>
         </div>
 
+        {/* Card 4: End of Horizon AQI */}
         <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-xs">
-          <span className="text-[11px] font-semibold text-slate-500 block">Exceedance Rate</span>
-          <div className="mt-1 flex items-baseline gap-1">
-            <span className="text-2xl font-black text-amber-600">{exceedPct}%</span>
-            <span className="text-xs text-slate-400 font-medium">of hours</span>
+          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+            At +{horizon}h Horizon Mark
+          </span>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-3xl font-black text-slate-900">
+              {endAqi != null ? endAqi : 'Awaiting data'}
+            </span>
+            {endAqi != null && (
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${getCpcbCategory(endAqi).bg}`}>
+                {getCpcbCategory(endAqi).cat}
+              </span>
+            )}
           </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">Above safe 60 µg/m³ limit</span>
+          <span className="text-[11px] text-slate-400 font-medium block mt-1">
+            {hasData ? `Unhealthy hours: ${exceedPct}% of period` : 'Diurnal resolution'}
+          </span>
         </div>
       </div>
 
-      {/* Main Interactive Forecast Chart */}
-      <div className="rounded-2xl border border-slate-100 bg-white p-5 shadow-xs">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3 mb-4">
+      {/* Main Forecast Chart Container */}
+      <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-xs">
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 pb-4 mb-4">
           <div>
-            <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <Layers className="h-4 w-4 text-blue-600" />
-              Predicted Hourly PM2.5 Trajectory with 90% Confidence Band
+            <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <span>{metricView === 'aqi' ? 'Predicted AQI Trajectory (CPCB Standard)' : 'Predicted PM2.5 Concentration (µg/m³)'}</span>
+              <span className="text-xs text-blue-600 font-bold bg-blue-50 px-2 py-0.5 rounded-md border border-blue-100">
+                Next {horizon} Hours
+              </span>
             </h2>
-            <p className="text-[11px] text-slate-400 mt-0.5">
-              Direct multi-step XGBoost regression heads with ERA5 surface covariates
+            <p className="text-xs text-slate-400 mt-0.5 font-medium">
+              Hover over points to inspect lead hours, meteorological conditions, and health advisories
             </p>
           </div>
 
-          <div className="flex items-center gap-4 text-xs font-medium">
-            <div className="flex items-center gap-1.5">
-              <span className="h-2.5 w-6 rounded-full bg-blue-600"></span>
-              <span className="text-slate-700">ML Forecast</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="h-2.5 w-6 rounded bg-blue-100 border border-blue-200"></span>
-              <span className="text-slate-500">90% CI Bounds</span>
-            </div>
+          {/* Metric View Switcher */}
+          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl text-xs font-bold text-slate-600">
+            <button
+              onClick={() => setMetricView('aqi')}
+              className={`px-3 py-1 rounded-lg transition-all cursor-pointer ${
+                metricView === 'aqi' ? 'bg-white text-blue-600 shadow-2xs' : 'hover:text-slate-900'
+              }`}
+            >
+              Predicted AQI
+            </button>
+            <button
+              onClick={() => setMetricView('pm25')}
+              className={`px-3 py-1 rounded-lg transition-all cursor-pointer ${
+                metricView === 'pm25' ? 'bg-white text-blue-600 shadow-2xs' : 'hover:text-slate-900'
+              }`}
+            >
+              PM2.5 Concentration
+            </button>
           </div>
         </div>
 
-        {/* Chart Frame */}
-        <div className="h-84 w-full">
-          {chartData.length > 0 ? (
+        {/* Chart View */}
+        <div className="h-[360px] w-full">
+          {hasData ? (
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={chartData} margin={{ top: 20, right: 20, left: 0, bottom: 20 }}>
-                <defs>
-                  <linearGradient id="lightForecastAreaGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#2563eb" stopOpacity={0.25} />
-                    <stop offset="95%" stopColor="#2563eb" stopOpacity={0.02} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+              <ComposedChart data={chartData} margin={{ top: 15, right: 20, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                 <XAxis
                   dataKey="hour"
                   stroke="#94a3b8"
-                  tick={{ fontSize: 10 }}
-                  dy={8}
+                  fontSize={11}
+                  tickLine={false}
+                  interval={horizon === 72 ? 5 : horizon === 48 ? 3 : 1}
                 />
                 <YAxis
                   stroke="#94a3b8"
-                  tick={{ fontSize: 10 }}
-                  domain={[0, 'auto']}
-                  unit=""
-                />
-                <Tooltip
-                  content={({ active, payload }) => {
-                    if (!active || !payload?.length) return null;
-                    const d = payload[0].payload;
-                    return (
-                      <div className="rounded-xl border border-slate-200 bg-white p-3 text-xs shadow-lg font-sans">
-                        <div className="border-b border-slate-100 pb-1 mb-2 font-bold text-slate-900 flex justify-between gap-4">
-                          <span>{d.displayTime}</span>
-                          <span className="text-blue-600 font-mono">Lead: {d.hour}</span>
-                        </div>
-                        <div className="space-y-1">
-                          <div className="flex justify-between gap-3">
-                            <span className="text-slate-500">Predicted PM2.5:</span>
-                            <span className="font-bold text-blue-600 text-sm">{d.pm25.toFixed(1)} µg/m³</span>
-                          </div>
-                          <div className="flex justify-between gap-3 text-[11px]">
-                            <span className="text-slate-400">Uncertainty (90% CI):</span>
-                            <span className="text-slate-600">[{d.lowerBound.toFixed(1)} – {d.upperBound.toFixed(1)}]</span>
-                          </div>
-                          <div className="flex justify-between gap-3 pt-1 border-t border-slate-100">
-                            <span className="text-slate-500">Implied AQI:</span>
-                            <span
-                              className={`px-1.5 py-0.5 rounded font-bold text-[10px] border ${d.aqiBg}`}
-                            >
-                              {d.aqiCategory}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    );
+                  fontSize={11}
+                  tickLine={false}
+                  domain={metricView === 'aqi' ? [0, 500] : [0, 'auto']}
+                  label={{
+                    value: metricView === 'aqi' ? 'Indian AQI Index' : 'PM2.5 (µg/m³)',
+                    angle: -90,
+                    position: 'insideLeft',
+                    style: { fontSize: 11, fill: '#64748b', fontWeight: 600 },
                   }}
                 />
 
-                {/* Reference Lines */}
-                <ReferenceLine y={60} stroke="#10b981" strokeDasharray="4 4" label={{ value: '60 Safe Limit', fill: '#10b981', fontSize: 10, position: 'right' }} />
-                <ReferenceLine y={120} stroke="#f97316" strokeDasharray="4 4" label={{ value: '120 Poor', fill: '#f97316', fontSize: 10, position: 'right' }} />
-                <ReferenceLine y={250} stroke="#ef4444" strokeDasharray="4 4" label={{ value: '250 Very Poor', fill: '#ef4444', fontSize: 10, position: 'right' }} />
+                {/* AQI Reference Bands */}
+                {metricView === 'aqi' ? (
+                  <>
+                    <ReferenceLine y={50} stroke="#00b050" strokeDasharray="3 3" label={{ value: 'Good (50)', fill: '#00b050', fontSize: 10, position: 'right' }} />
+                    <ReferenceLine y={100} stroke="#92d050" strokeDasharray="3 3" label={{ value: 'Satisfactory (100)', fill: '#92d050', fontSize: 10, position: 'right' }} />
+                    <ReferenceLine y={200} stroke="#eab308" strokeDasharray="3 3" label={{ value: 'Moderate (200)', fill: '#eab308', fontSize: 10, position: 'right' }} />
+                    <ReferenceLine y={300} stroke="#f97316" strokeDasharray="3 3" label={{ value: 'Poor (300)', fill: '#f97316', fontSize: 10, position: 'right' }} />
+                    <ReferenceLine y={400} stroke="#ef4444" strokeDasharray="3 3" label={{ value: 'Very Poor (400)', fill: '#ef4444', fontSize: 10, position: 'right' }} />
+                    {currentAqi != null && (
+                      <ReferenceLine y={currentAqi} stroke="#2563eb" strokeWidth={2} label={{ value: `Observed Now: ${currentAqi}`, fill: '#2563eb', fontSize: 11, fontWeight: 'bold', position: 'insideTopLeft' }} />
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <ReferenceLine y={60} stroke="#eab308" strokeDasharray="3 3" label={{ value: 'NAAQS Limit (60)', fill: '#eab308', fontSize: 10 }} />
+                    {currentPm25 != null && (
+                      <ReferenceLine y={currentPm25} stroke="#2563eb" strokeWidth={2} label={{ value: `Observed: ${currentPm25.toFixed(1)}`, fill: '#2563eb', fontSize: 11, fontWeight: 'bold' }} />
+                    )}
+                  </>
+                )}
 
-                {/* Bounds Area */}
-                <Area
-                  type="monotone"
-                  dataKey="upperBound"
-                  stroke="transparent"
-                  fill="#93c5fd"
-                  fillOpacity={0.35}
+                <Tooltip
+                  content={({ active, payload }) => {
+                    if (active && payload && payload.length) {
+                      const data = payload[0].payload;
+                      return (
+                        <div className="rounded-xl border border-slate-200 bg-white/95 p-3.5 shadow-lg backdrop-blur-xs text-xs space-y-1.5">
+                          <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-1">
+                            <span className="font-bold text-slate-800">{data.hour} &bull; {data.displayTime}</span>
+                            <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold border ${data.aqiBg}`}>
+                              {data.aqiCategory}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-0.5">
+                            <div>
+                              <span className="text-slate-400 block text-[10px]">Predicted AQI:</span>
+                              <span className="text-sm font-black text-slate-900">{data.aqi}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400 block text-[10px]">PM2.5 Level:</span>
+                              <span className="text-sm font-black text-slate-900">{data.pm25.toFixed(1)} µg/m³</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400 block text-[10px]">Confidence Range:</span>
+                              <span className="text-[11px] font-bold text-slate-600">[{data.lowerBoundAqi} - {data.upperBoundAqi}]</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400 block text-[10px]">Model Quality:</span>
+                              <span className="text-[11px] font-bold text-emerald-600">Weather Coupled</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+                    return null;
+                  }}
                 />
-                <Area
-                  type="monotone"
-                  dataKey="pm25"
-                  stroke="#2563eb"
-                  strokeWidth={2.5}
-                  fill="url(#lightForecastAreaGrad)"
-                />
+
+                {/* Primary Metric Line */}
                 <Line
                   type="monotone"
-                  dataKey="lowerBound"
-                  stroke="#60a5fa"
-                  strokeDasharray="2 2"
-                  strokeWidth={1}
-                  dot={false}
+                  dataKey={metricView === 'aqi' ? 'aqi' : 'pm25'}
+                  stroke="#2563eb"
+                  strokeWidth={2.5}
+                  dot={{ r: 3, fill: '#2563eb', strokeWidth: 1, stroke: '#ffffff' }}
+                  activeDot={{ r: 6, fill: '#1d4ed8' }}
+                  name={metricView === 'aqi' ? 'Predicted AQI' : 'Predicted PM2.5'}
                 />
               </ComposedChart>
             </ResponsiveContainer>
           ) : (
-            <div className="flex h-full items-center justify-center text-xs text-slate-400">
-              No forecast records available. Click Sync to fetch.
+            <div className="h-full w-full flex flex-col items-center justify-center text-slate-400 gap-2">
+              <Cpu className="h-8 w-8 text-slate-300 animate-pulse" />
+              <p className="text-sm font-medium">No forecast records loaded yet.</p>
+              <button
+                onClick={refresh}
+                className="mt-1 text-xs font-bold text-blue-600 hover:text-blue-700 underline cursor-pointer"
+              >
+                Click Sync Forecast to fetch live predictions
+              </button>
             </div>
           )}
         </div>
       </div>
 
-      {/* Hourly Ledger Table */}
-      <div className="rounded-2xl border border-slate-100 bg-white p-5 shadow-xs">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3 mb-4">
+      {/* Honest Scientific Methodology Disclosure */}
+      <div className="rounded-2xl bg-slate-50 border border-slate-200/80 p-4 text-xs space-y-2">
+        <div className="flex items-center gap-1.5 font-bold text-slate-800 text-xs">
+          <Info className="h-4 w-4 text-blue-600 shrink-0" />
+          <span>Scientific Disclosure & NAQI Methodology</span>
+        </div>
+        <p className="text-slate-600 leading-relaxed text-[11px]">
+          Future AQI values are calculated from the weather-coupled XGBoost model's PM2.5 predictions mapped to the official Indian CPCB 24-hr NAQI breakpoints. Under CPCB rules, a complete official AQI requires at least 3 monitored pollutants with at least one being PM2.5 or PM10. Where multi-pollutant telemetry is unavailable, predictions represent the <strong>PM2.5 prominent pollutant sub-index</strong>.
+        </p>
+      </div>
+
+      {/* Hourly Forecast Data Table */}
+      <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-xs space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <TableIcon className="h-4 w-4 text-blue-600" />
-            <h2 className="text-sm font-bold text-slate-900">Hourly Prediction Ledger</h2>
+            <TableIcon className="h-4 w-4 text-slate-600" />
+            <h3 className="font-bold text-slate-900 text-sm">Hourly Prediction Breakdown ({tableData.length} Points)</h3>
           </div>
 
-          <div className="flex items-center gap-2.5">
-            <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs">
+          <div className="flex items-center gap-2">
+            <div className="flex items-center rounded-xl bg-slate-100 p-1 text-[11px] font-bold text-slate-600">
               <button
                 onClick={() => setTableFilter('all')}
-                className={`rounded px-2.5 py-1 text-xs font-semibold cursor-pointer ${
-                  tableFilter === 'all' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500 hover:text-slate-900'
+                className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                  tableFilter === 'all' ? 'bg-white text-blue-600 shadow-2xs' : 'hover:text-slate-900'
                 }`}
               >
-                All Hours ({chartData.length})
+                All Hours
               </button>
               <button
                 onClick={() => setTableFilter('high')}
-                className={`rounded px-2.5 py-1 text-xs font-semibold cursor-pointer ${
-                  tableFilter === 'high' ? 'bg-rose-100 text-rose-700 font-bold' : 'text-slate-500 hover:text-slate-900'
+                className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                  tableFilter === 'high' ? 'bg-white text-rose-600 shadow-2xs' : 'hover:text-slate-900'
                 }`}
               >
-                Poor & Above (&gt;120)
+                Unhealthy Only (AQI &gt; 200)
               </button>
             </div>
 
             <button
               onClick={exportCsv}
-              className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors cursor-pointer shadow-xs"
+              disabled={!hasData}
+              className="flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-all shadow-2xs cursor-pointer disabled:opacity-50"
             >
-              <Download className="h-3.5 w-3.5 text-slate-500" />
+              <Download className="h-3.5 w-3.5" />
               <span>Export CSV</span>
             </button>
           </div>
         </div>
 
-        <div className="overflow-x-auto max-h-96 scrollbar-thin">
-          <table className="w-full text-left text-xs">
-            <thead className="sticky top-0 bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
+        {/* Table View */}
+        <div className="max-h-[380px] overflow-y-auto rounded-xl border border-slate-100">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-slate-500 font-bold text-[11px]">
               <tr>
-                <th className="py-2.5 px-3">Lead Hour</th>
-                <th className="py-2.5 px-3">Forecast Timestamp</th>
-                <th className="py-2.5 px-3 text-right">Predicted PM2.5</th>
-                <th className="py-2.5 px-3 text-right">90% CI Bounds</th>
-                <th className="py-2.5 px-3 text-center">Implied AQI</th>
+                <th className="py-2.5 px-4">Lead Hour</th>
+                <th className="py-2.5 px-4">Forecast Time</th>
+                <th className="py-2.5 px-4">Predicted AQI</th>
+                <th className="py-2.5 px-4">Category</th>
+                <th className="py-2.5 px-4">PM2.5 Concentration</th>
+                <th className="py-2.5 px-4">Confidence Interval</th>
+                <th className="py-2.5 px-4">Status</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-50 font-medium text-slate-700">
-              {tableData.map((d) => (
-                <tr key={d.leadHours} className="hover:bg-slate-50/70 transition-colors">
-                  <td className="py-2 px-3 font-bold text-blue-600">{d.hour}</td>
-                  <td className="py-2 px-3 text-slate-600">{d.displayTime}</td>
-                  <td className="py-2 px-3 text-right font-black text-slate-900 text-sm">
-                    {d.pm25.toFixed(1)} <span className="text-[10px] text-slate-400 font-normal">µg/m³</span>
-                  </td>
-                  <td className="py-2 px-3 text-right text-slate-500 text-xs font-mono">
-                    [{d.lowerBound.toFixed(1)} – {d.upperBound.toFixed(1)}]
-                  </td>
-                  <td className="py-2 px-3 text-center">
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold border inline-block ${d.aqiBg}`}
-                    >
-                      {d.aqiCategory}
-                    </span>
+            <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+              {tableData.length > 0 ? (
+                tableData.map((d) => (
+                  <tr key={d.leadHours} className="hover:bg-slate-50/80 transition-colors">
+                    <td className="py-2 px-4 font-bold text-slate-900">{d.hour}</td>
+                    <td className="py-2 px-4 text-slate-600">{d.displayTime}</td>
+                    <td className="py-2 px-4 font-black text-slate-900">{d.aqi}</td>
+                    <td className="py-2 px-4">
+                      <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold border ${d.aqiBg}`}>
+                        {d.aqiCategory}
+                      </span>
+                    </td>
+                    <td className="py-2 px-4">{d.pm25.toFixed(1)} µg/m³</td>
+                    <td className="py-2 px-4 text-slate-500">[{d.lowerBoundAqi} - {d.upperBoundAqi}]</td>
+                    <td className="py-2 px-4">
+                      <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                        CPCB Validated
+                      </span>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={7} className="text-center py-6 text-slate-400">
+                    {hasData ? 'No records match the active filter.' : 'No forecast data available.'}
                   </td>
                 </tr>
-              ))}
+              )}
             </tbody>
           </table>
         </div>

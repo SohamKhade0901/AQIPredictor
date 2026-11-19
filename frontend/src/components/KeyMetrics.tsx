@@ -81,7 +81,7 @@ export const KeyMetrics: React.FC<KeyMetricsProps> = ({ analysis, weather, loadi
 
         <div className="my-3 flex items-baseline gap-2">
           <span className="text-4xl font-extrabold text-white tracking-tight">
-            {pm25Value.toFixed(1)}
+            {pm25Value > 0 ? pm25Value.toFixed(1) : '--'}
           </span>
           <span className="text-sm font-medium text-slate-400">µg/m³</span>
           <div className="ml-auto flex items-center text-xs font-semibold">
@@ -89,10 +89,12 @@ export const KeyMetrics: React.FC<KeyMetricsProps> = ({ analysis, weather, loadi
               <span className="flex items-center text-rose-400 bg-rose-950/40 px-1.5 py-0.5 rounded border border-rose-800/50">
                 <ArrowUpRight className="w-3.5 h-3.5 mr-0.5" /> {(pm25Value / 60).toFixed(1)}x Std
               </span>
-            ) : (
+            ) : pm25Value > 0 ? (
               <span className="flex items-center text-emerald-400 bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-800/50">
                 <ArrowDownRight className="w-3.5 h-3.5 mr-0.5" /> Within Std
               </span>
+            ) : (
+              <span className="text-slate-500 text-xs px-1.5 py-0.5">No Data</span>
             )}
           </div>
         </div>
@@ -123,7 +125,7 @@ export const KeyMetrics: React.FC<KeyMetricsProps> = ({ analysis, weather, loadi
 
         <div className="my-2 flex items-baseline gap-2">
           <span className="text-4xl font-extrabold tracking-tight" style={{ color: aqiColor }}>
-            {aqiValue}
+            {aqiValue > 0 ? aqiValue : '--'}
           </span>
           <span className="text-xs text-slate-400 font-medium">/ 500 Index</span>
         </div>

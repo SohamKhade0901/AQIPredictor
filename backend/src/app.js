@@ -12,6 +12,7 @@ import forecastRoutes from './routes/forecastRoutes.js';
 import analysisRoutes from './routes/analysisRoutes.js';
 import modelRoutes from './routes/modelRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
+import chatRoutes from './routes/chatRoutes.js';
 
 // Middleware
 import { errorHandler } from './middleware/errorHandler.js';
@@ -51,6 +52,8 @@ app.get('/', (req, res) => {
       weather: '/api/weather?stationId=<id>&hours=72',
       observations: '/api/observations?stationId=<id>',
       modelMetrics: '/api/model/metrics',
+      chat: '/api/chat',
+      chatStatus: '/api/chat/status',
     },
   });
 });
@@ -64,6 +67,7 @@ app.use('/api', forecastRoutes);
 app.use('/api', analysisRoutes);
 app.use('/api', modelRoutes);
 app.use('/api', adminRoutes);
+app.use('/api', chatRoutes);
 
 // 404 handler
 app.use((req, res) => {

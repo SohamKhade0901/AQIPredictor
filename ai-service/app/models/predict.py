@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 ARTIFACTS_DIR = Path(os.getenv("MODEL_ARTIFACTS_DIR", "./artifacts"))
@@ -119,28 +119,28 @@ def predict_72h(station_id: str, issued_at: str, recent_pm25: list[dict],
         ts = w["timestamp"][:16]  # YYYY-MM-DDTHH:MM
         weather_index[ts] = w
 
+    # Resolve initial weather at issued_at (or closest available)
+    issued_key = issued_ts.strftime("%Y-%m-%dT%H:%M")
+    current_weather = weather_index.get(issued_key, {})
+    if not current_weather and weather_data:
+        current_weather = weather_data[0]
+
+    # Build base feature row at issued_at
+    base_row = _build_feature_row(issued_ts, 0, pm25_values, current_weather, feature_cols)
+    feat_df = pd.DataFrame([base_row])[feature_cols]
+
+    # MultiOutputRegressor predicts all 72 horizons simultaneously in a single vectorized step (<100ms)
+    preds = _model.predict(feat_df)
+
     forecasts = []
-    from datetime import timedelta
 
     for h in range(1, forecast_hours + 1):
         forecast_time = issued_ts + timedelta(hours=h)
+        h_idx = min(h - 1, preds.shape[1] - 1)
+        predicted_pm25 = float(np.clip(preds[0, h_idx], 0, 999))
+
         ts_key = forecast_time.strftime("%Y-%m-%dT%H:%M")
-
-        # Get weather at this forecast hour (future weather from Open-Meteo forecast)
         w = weather_index.get(ts_key, {})
-        if not w:
-            # Try closest available
-            w = weather_index.get(list(weather_index.keys())[-1], {}) if weather_index else {}
-
-        row = _build_feature_row(issued_ts, h, pm25_values, w, feature_cols)
-
-        # Build DataFrame row
-        feat_df = pd.DataFrame([row])[feature_cols]
-
-        pred = _model.predict(feat_df)
-        # pred shape: (1, 72) — we want the +h column
-        h_idx = min(h - 1, pred.shape[1] - 1)
-        predicted_pm25 = float(np.clip(pred[0, h_idx], 0, 999))
 
         data_quality = "ok"
         if not w:

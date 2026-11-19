@@ -125,6 +125,10 @@ export const Sidebar: React.FC = () => {
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0"></span>
               <span>Database</span>
             </div>
+            <div className="flex items-center gap-2.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-blue-500 shrink-0"></span>
+              <span>Voice AI Assistant</span>
+            </div>
           </div>
         </div>
       </div>

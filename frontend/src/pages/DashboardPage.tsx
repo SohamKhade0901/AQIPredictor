@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useStation } from '../context/StationContext';
+import { StationMap } from '../components/StationMap';
 import {
   BarChart2,
   Wind,
@@ -8,6 +9,7 @@ import {
   MapPin,
   Cpu,
   ArrowRight,
+  Clock,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -23,19 +25,37 @@ import {
 
 export const DashboardPage: React.FC = () => {
   const {
+    selectedStationId,
     selectedStation,
+    setSelectedStationId,
     analysis,
     weatherHistory,
     pollutionHistory,
     forecasts,
     horizon,
     stations,
+    stationPm25Map,
   } = useStation();
 
   // Weather & AQI readings from live DB / analysis
   const weather = analysis?.weather || weatherHistory[weatherHistory.length - 1] || null;
-  const pm25Value = analysis?.latestPm25?.value ?? (pollutionHistory.length ? pollutionHistory[pollutionHistory.length - 1].value : 229.7);
-  const aqiValue = analysis?.currentAqi?.aqi ?? Math.round(pm25Value * 1.68);
+  const rawPm25 = analysis?.latestPm25?.value ??
+    (selectedStation?.pm25 && selectedStation.pm25 > 0 ? selectedStation.pm25 : null) ??
+    (selectedStation && stationPm25Map[selectedStation.id] > 0 ? stationPm25Map[selectedStation.id] : null) ??
+    (pollutionHistory.length && pollutionHistory[pollutionHistory.length - 1].value > 0 ? pollutionHistory[pollutionHistory.length - 1].value : null);
+
+  const pm25Value: number | null = rawPm25 != null && rawPm25 > 0 ? rawPm25 : null;
+  const calcCpcbAqi = (pm: number): number => {
+    if (pm <= 0) return 0;
+    if (pm <= 30) return Math.round((50 / 30) * pm);
+    if (pm <= 60) return Math.round(((100 - 51) / (60 - 31)) * (pm - 31) + 51);
+    if (pm <= 90) return Math.round(((200 - 101) / (90 - 61)) * (pm - 61) + 101);
+    if (pm <= 120) return Math.round(((300 - 201) / (120 - 91)) * (pm - 91) + 201);
+    if (pm <= 250) return Math.round(((400 - 301) / (250 - 121)) * (pm - 121) + 301);
+    return Math.min(500, Math.round(((500 - 401) / (380 - 251)) * (pm - 251) + 401));
+  };
+  const aqiValue: number | null = analysis?.currentAqi?.aqi ??
+    (selectedStation?.currentAqi && selectedStation.currentAqi > 0 ? selectedStation.currentAqi : (pm25Value != null ? calcCpcbAqi(pm25Value) : null));
 
   const temperature = weather?.temperature != null ? weather.temperature.toFixed(1) : '19.8';
   const windSpeed = weather?.windSpeed != null ? weather.windSpeed.toFixed(1) : '1.3';
@@ -59,11 +79,12 @@ export const DashboardPage: React.FC = () => {
     };
   });
 
-  // Historical tail (-6h, -3h, Now)
+  // Historical tail (-6h, -3h, Now) anchored safely
+  const baseAnchor = pm25Value ?? (forecasts.length > 0 ? forecasts[0].predictedValue : 120);
   const historicalTail = [
-    { name: '-6h', leadHours: -6, predicted: null, confidenceArea: null, lowerBound: null, upperBound: null, historical: Math.max(20, pm25Value - 45) },
-    { name: '-3h', leadHours: -3, predicted: null, confidenceArea: null, lowerBound: null, upperBound: null, historical: Math.max(20, pm25Value - 12) },
-    { name: 'Now', leadHours: 0, predicted: pm25Value, confidenceArea: [pm25Value - 5, pm25Value + 5], lowerBound: pm25Value - 5, upperBound: pm25Value + 5, historical: pm25Value },
+    { name: '-6h', leadHours: -6, predicted: null, confidenceArea: null, lowerBound: null, upperBound: null, historical: Math.max(20, baseAnchor - 45) },
+    { name: '-3h', leadHours: -3, predicted: null, confidenceArea: null, lowerBound: null, upperBound: null, historical: Math.max(20, baseAnchor - 12) },
+    { name: 'Now', leadHours: 0, predicted: pm25Value, confidenceArea: pm25Value != null ? [pm25Value - 5, pm25Value + 5] : null, lowerBound: pm25Value != null ? pm25Value - 5 : null, upperBound: pm25Value != null ? pm25Value + 5 : null, historical: pm25Value },
   ];
 
   const fullChartData = [...historicalTail, ...forecastPoints];
@@ -76,7 +97,10 @@ export const DashboardPage: React.FC = () => {
   const exceedPct = values.length ? Math.round((values.filter((v) => v > 60).length / values.length) * 100) : 95;
 
   // Dynamic CPCB AQI details helper
-  const getAqiDetails = (val: number) => {
+  const getAqiDetails = (val: number | null) => {
+    if (val == null || val <= 0) {
+      return { category: 'Awaiting Data', badgeBg: 'bg-slate-100 text-slate-600 border-slate-200', impact: 'Awaiting sensor reading', tag: 'Pending', tagColor: 'text-slate-400' };
+    }
     if (val <= 50) return { category: 'Good', badgeBg: 'bg-emerald-50 text-emerald-700 border-emerald-200', impact: 'Minimal impact', tag: 'Safe air', tagColor: 'text-emerald-600' };
     if (val <= 100) return { category: 'Satisfactory', badgeBg: 'bg-lime-50 text-lime-700 border-lime-200', impact: 'Minor breathing discomfort', tag: 'Acceptable', tagColor: 'text-lime-600' };
     if (val <= 200) return { category: 'Moderate', badgeBg: 'bg-amber-50 text-amber-700 border-amber-200', impact: 'Discomfort for sensitive groups', tag: 'Moderate impact', tagColor: 'text-amber-600' };
@@ -101,7 +125,7 @@ export const DashboardPage: React.FC = () => {
         closestObs = o;
       }
     }
-    if (closestObs && closestObs.value > 0) {
+    if (closestObs && closestObs.value > 0 && pm25Value != null) {
       changePct = Math.round(((pm25Value - closestObs.value) / closestObs.value) * 100);
     }
   }
@@ -153,9 +177,9 @@ export const DashboardPage: React.FC = () => {
 
           <div className="my-4 flex items-baseline gap-2">
             <span className="text-4xl font-black text-slate-900 tracking-tight leading-none">
-              {pm25Value.toFixed(1)}
+              {pm25Value != null ? pm25Value.toFixed(1) : '--'}
             </span>
-            <span className="text-sm font-bold text-slate-400">µg/m³</span>
+            {pm25Value != null && <span className="text-sm font-bold text-slate-400">µg/m³</span>}
           </div>
 
           <div className="text-xs font-semibold flex items-center justify-between border-t border-slate-100 pt-4">
@@ -182,9 +206,9 @@ export const DashboardPage: React.FC = () => {
 
           <div className="my-4 flex items-baseline gap-2">
             <span className="text-4xl font-black text-slate-900 tracking-tight leading-none">
-              {aqiValue}
+              {aqiValue != null ? aqiValue : '--'}
             </span>
-            <span className="text-xs font-bold text-slate-400">/ 500 Index</span>
+            {aqiValue != null && <span className="text-xs font-bold text-slate-400">/ 500 Index</span>}
           </div>
 
           <div className="text-xs text-slate-500 flex items-center justify-between border-t border-slate-100 pt-4">
@@ -244,6 +268,203 @@ export const DashboardPage: React.FC = () => {
           <div className="text-xs text-slate-500 flex items-center justify-between border-t border-slate-100 pt-4">
             <span>From NW ({windDir}°)</span>
             <span className="text-rose-600 font-bold text-xs">Low dispersion</span>
+          </div>
+        </div>
+      </div>
+
+      {/* 2.5 Interactive Delhi NCR Geospatial Map & Synchronized Corridor Inspector */}
+      <div className="flex flex-col gap-5">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 text-xs font-bold text-blue-600">
+              <MapPin className="h-4 w-4" />
+              <span>Spatial Monitoring & Multi-Horizon Forecast Explorer</span>
+            </div>
+            <h2 className="text-xl font-black text-slate-900 tracking-tight mt-1">
+              Delhi NCR Continuous Spatial Monitoring Network
+            </h2>
+            <p className="text-xs text-slate-500 font-medium mt-0.5">
+              Click any station on the interactive map or select from the corridor menu to focus predictions & telemetry
+            </p>
+          </div>
+
+          {/* Synchronized Station Selector */}
+          <div className="flex items-center gap-2 bg-white border border-slate-200/90 rounded-2xl p-1.5 shadow-2xs">
+            <span className="text-[11px] font-bold text-slate-400 pl-2">Active Station:</span>
+            <select
+              value={selectedStationId}
+              onChange={(e) => setSelectedStationId(e.target.value)}
+              className="bg-slate-50 text-xs font-bold text-slate-800 rounded-xl px-3 py-1.5 border border-slate-200 focus:outline-none focus:border-blue-500 cursor-pointer"
+            >
+              {stations.map((st) => (
+                <option key={st.id} value={st.id}>
+                  {st.name} &bull; {st.currentAqi != null ? `AQI ${st.currentAqi}` : 'No AQI'}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+          {/* Left Column: Interactive Leaflet Map */}
+          <div className="lg:col-span-7 bg-white rounded-3xl border border-slate-200/90 p-6 shadow-xs flex flex-col justify-between">
+            <div className="flex items-center justify-between mb-3.5 pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full bg-blue-600 animate-pulse"></span>
+                <span className="text-xs font-bold text-slate-800">
+                  Viewing: <strong className="text-blue-600">{selectedStation?.name || 'Anand Vihar'}</strong>
+                </span>
+              </div>
+              <span className="text-[11px] text-slate-400 font-medium">
+                {stations.length} Continuous Corridors Monitored
+              </span>
+            </div>
+
+            <div className="h-[400px] w-full">
+              <StationMap
+                stations={stations}
+                selectedStationId={selectedStationId}
+                onSelectStation={setSelectedStationId}
+                stationPm25Map={stationPm25Map}
+                heightClass="h-[360px]"
+              />
+            </div>
+          </div>
+
+          {/* Right Column: Synchronized Active Station Inspector Panel */}
+          <div className="lg:col-span-5 bg-white rounded-3xl border border-slate-200/90 p-6 shadow-xs flex flex-col justify-between">
+            <div>
+              {/* Header */}
+              <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-lg font-black text-slate-900 tracking-tight">
+                      {selectedStation?.name || 'Anand Vihar'}
+                    </h3>
+                    <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border ${aqiDetails.badgeBg}`}>
+                      {aqiDetails.category}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1 font-medium">
+                    {selectedStation?.city || 'Delhi NCR'} &bull; Lat: {selectedStation?.latitude.toFixed(3)}°N, Lon: {selectedStation?.longitude.toFixed(3)}°E
+                  </p>
+                </div>
+                <div className="text-right shrink-0">
+                  <span className="text-[10px] block text-slate-400 font-bold uppercase">Status</span>
+                  <span className={`text-xs font-bold ${selectedStation?.isStale ? 'text-amber-600' : 'text-emerald-600'}`}>
+                    {selectedStation?.isStale ? 'Stale Data' : 'Live Sensor'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Spotlight: Current AQI & PM2.5 */}
+              <div className="my-4 p-4 rounded-2xl bg-slate-50/90 border border-slate-100 flex items-center justify-between">
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">
+                    {selectedStation?.isStale ? 'Last Observed AQI' : 'Current Observed AQI'}
+                  </span>
+                  <div className="flex items-baseline gap-2 mt-1">
+                    <span className="text-3xl font-black text-slate-900">{aqiValue ?? '--'}</span>
+                    <span className="text-xs font-bold text-slate-400">/ 500 Index</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">PM2.5 Baseline</span>
+                  <div className="text-base font-black text-slate-900 mt-1">
+                    {pm25Value != null ? `${pm25Value.toFixed(1)} µg/m³` : '--'}
+                  </div>
+                </div>
+              </div>
+
+              {/* 3 Multi-Horizon Predictions (+24h, +48h, +72h) */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    XGBoost Predicted Horizons
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-medium">CPCB NAQI Scale</span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  {/* +24h */}
+                  <div className="p-2.5 rounded-2xl border border-slate-100 bg-slate-50/70 text-center">
+                    <span className="text-[10px] font-bold text-slate-400 block">+24 Hours</span>
+                    <span className="text-base font-black text-slate-900 block mt-0.5">
+                      {selectedStation?.predictedAqi24h != null ? selectedStation.predictedAqi24h : '--'}
+                    </span>
+                    <span className={`inline-block px-1.5 py-0.2 rounded text-[9px] font-bold mt-1 border ${
+                      selectedStation?.predictedCategory24h ? 'bg-amber-50 text-amber-800 border-amber-200' : 'bg-slate-100 text-slate-600'
+                    }`}>
+                      {selectedStation?.predictedCategory24h || 'Pending'}
+                    </span>
+                    <span className="text-[9px] text-slate-400 block mt-1">
+                      {selectedStation?.predictedPm25_24h != null ? `${selectedStation.predictedPm25_24h} µg/m³` : '--'}
+                    </span>
+                  </div>
+
+                  {/* +48h */}
+                  <div className="p-2.5 rounded-2xl border border-slate-100 bg-slate-50/70 text-center">
+                    <span className="text-[10px] font-bold text-slate-400 block">+48 Hours</span>
+                    <span className="text-base font-black text-slate-900 block mt-0.5">
+                      {selectedStation?.predictedAqi48h != null ? selectedStation.predictedAqi48h : '--'}
+                    </span>
+                    <span className={`inline-block px-1.5 py-0.2 rounded text-[9px] font-bold mt-1 border ${
+                      selectedStation?.predictedCategory48h ? 'bg-amber-50 text-amber-800 border-amber-200' : 'bg-slate-100 text-slate-600'
+                    }`}>
+                      {selectedStation?.predictedCategory48h || 'Pending'}
+                    </span>
+                    <span className="text-[9px] text-slate-400 block mt-1">
+                      {selectedStation?.predictedPm25_48h != null ? `${selectedStation.predictedPm25_48h} µg/m³` : '--'}
+                    </span>
+                  </div>
+
+                  {/* +72h */}
+                  <div className="p-2.5 rounded-2xl border border-slate-100 bg-slate-50/70 text-center">
+                    <span className="text-[10px] font-bold text-slate-400 block">+72 Hours</span>
+                    <span className="text-base font-black text-slate-900 block mt-0.5">
+                      {selectedStation?.predictedAqi72h != null ? selectedStation.predictedAqi72h : '--'}
+                    </span>
+                    <span className={`inline-block px-1.5 py-0.2 rounded text-[9px] font-bold mt-1 border ${
+                      selectedStation?.predictedCategory72h ? 'bg-amber-50 text-amber-800 border-amber-200' : 'bg-slate-100 text-slate-600'
+                    }`}>
+                      {selectedStation?.predictedCategory72h || 'Pending'}
+                    </span>
+                    <span className="text-[9px] text-slate-400 block mt-1">
+                      {selectedStation?.predictedPm25_72h != null ? `${selectedStation.predictedPm25_72h} µg/m³` : '--'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Timestamp footer */}
+              {selectedStation?.measurementTimeIST && (
+                <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                  <span className="flex items-center gap-1">
+                    <Clock className="h-3.5 w-3.5 text-slate-400" />
+                    <span>Observed: {selectedStation.measurementTimeIST}</span>
+                  </span>
+                  <span className="text-slate-400">OpenAQ #{selectedStation.openaqId || selectedStation.id}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Navigation Buttons */}
+            <div className="mt-4 pt-3.5 border-t border-slate-100 flex items-center gap-2">
+              <NavLink
+                to="/forecast"
+                className="flex-1 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs text-center transition-colors shadow-2xs flex items-center justify-center gap-1.5"
+              >
+                <span>Full 72h Forecast Studio</span>
+                <ArrowRight className="h-3.5 w-3.5" />
+              </NavLink>
+              <NavLink
+                to="/stations"
+                className="py-2 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs text-center transition-colors"
+                title="View Station Directory"
+              >
+                Directory
+              </NavLink>
+            </div>
           </div>
         </div>
       </div>

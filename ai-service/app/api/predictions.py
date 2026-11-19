@@ -63,7 +63,7 @@ class PredictResponse(BaseModel):
 
 
 @router.post("/predict", response_model=PredictResponse)
-async def predict(request: PredictRequest):
+def predict(request: PredictRequest):
     if not predict_module.MODEL_LOADED:
         try:
             predict_module.load_model()

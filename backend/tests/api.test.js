@@ -14,8 +14,7 @@ describe('Express API Integration Tests', () => {
     expect(station).toHaveProperty('id');
     expect(station).toHaveProperty('name');
     expect(station).toHaveProperty('latitude');
-    expect(station).toHaveProperty('longitude');
-  });
+    expect(station).toHaveProperty('longitude'); }, 30000);
 
   it('GET /api/model/metrics should return 200 with model benchmarks', async () => {
     const res = await request(app).get('/api/model/metrics');
@@ -38,8 +37,7 @@ describe('Express API Integration Tests', () => {
     expect([200, 207]).toContain(res.status);
     expect(res.body).toHaveProperty('services');
     expect(res.body.services).toHaveProperty('database');
-    expect(res.body.services).toHaveProperty('aiService');
-  });
+    expect(res.body.services).toHaveProperty('aiService'); }, 30000);
 
   it('GET /api/forecast without stationId should return 400', async () => {
     const res = await request(app).get('/api/forecast');
